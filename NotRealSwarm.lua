@@ -227,8 +227,38 @@ SettingsPage:ColorPicker({
 -- 5. ЗАПУСК ЛОГИКИ СЛУШАТЕЛЕЙ ЧАТА (BACKUP)
 -- ==========================================
 
+-- Словесные ARMY-алиасы: "Army, jump" работает так же, как "!jump".
+-- Чтобы добавить новый алиас, просто впиши строку вида ["фраза"] = "!команда".
+local ARMY_ALIASES = {
+    ["jump"] = "!jump",
+    ["follow me"] = "!follow",
+    ["follow"] = "!follow",
+    ["orbit"] = "!orbit",
+    ["stop"] = "!stop",
+    ["stay"] = "!stop",
+    ["halt"] = "!stop",
+}
+
+-- Превращает "Army, follow me" в "!follow" (с сохранением доп. аргументов после фразы)
+local function resolveArmyAlias(msg)
+    local phrase = string.lower(msg):match("^army,?%s+(.-)%s*$")
+    if not phrase then return nil end
+
+    local bestPhrase, bestCommand = nil, nil
+    for aliasPhrase, command in pairs(ARMY_ALIASES) do
+        if phrase == aliasPhrase or phrase:sub(1, #aliasPhrase + 1) == aliasPhrase .. " " then
+            if not bestPhrase or #aliasPhrase > #bestPhrase then
+                bestPhrase, bestCommand = aliasPhrase, command
+            end
+        end
+    end
+
+    if not bestCommand then return nil end
+    return bestCommand .. phrase:sub(#bestPhrase + 1)
+end
+
 local function processCommand(msg)
-    local args = string.split(msg, " ")
+    local args = string.split(resolveArmyAlias(msg) or msg, " ")
     local command = string.lower(args[1])
 
     if command == "!jump" then
