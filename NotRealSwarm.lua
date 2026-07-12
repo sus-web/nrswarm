@@ -215,13 +215,33 @@ local function enableFlyMode(character)
     flyModeCharacter = character
 end
 
--- Двигает "летящего" персонажа к targetPosition, разворачивая его в сторону lookAtPosition
+-- Двигает "летящего" персонажа к targetPosition, разворачивая его в сторону lookAtPosition.
+-- Разово выставленный CanCollide=false может быть сброшен движком/чужими скриптами —
+-- поэтому переустанавливаем его каждый кадр на всех частях персонажа, а не только
+-- один раз при входе в полёт (стандартная практика для клиентского noclip).
 local function flyTo(hrp, targetPosition, lookAtPosition)
     if not flyBodyVelocity or not flyBodyGyro then return end
+
+    for part in pairs(flyModeOriginalCollide) do
+        if part and part.Parent then part.CanCollide = false end
+    end
+
     local toTarget = targetPosition - hrp.Position
     local dist = toTarget.Magnitude
     flyBodyVelocity.Velocity = dist > 0.05 and (toTarget.Unit * math.min(dist * 4, FLY_SPEED)) or Vector3.new()
     flyBodyGyro.CFrame = CFrame.lookAt(hrp.Position, lookAtPosition)
+end
+
+-- Анимация плавания для !swim — см. ниже, почему это отдельная анимация, а не
+-- Humanoid:ChangeState(Swimming)
+local swimAnimationTrack = nil
+
+local function stopSwimAnimation()
+    if swimAnimationTrack then
+        swimAnimationTrack:Stop()
+        swimAnimationTrack:Destroy()
+        swimAnimationTrack = nil
+    end
 end
 
 -- Функция остановки активных циклов
@@ -231,6 +251,7 @@ local function stopCurrentTask()
         currentTask = nil
     end
     disableFlyMode()
+    stopSwimAnimation()
 end
 
 -- Индекс бота для распределения в пространстве: если оператор явно назначил номер
@@ -376,11 +397,12 @@ local function startFollow(radius)
     end)
 end
 
--- !swim: включает полёт (BodyVelocity/BodyGyro, как в !orbit) и держит анимацию
--- плавания через Humanoid:ChangeState(Swimming) — так персонаж плывёт прямо по
--- воздуху, а не только в настоящей воде. ChangeState вызываем только при реальном
--- переходе в это состояние, а не каждый кадр — иначе анимация перезапускается с
--- начала 60 раз в секунду и выглядит как "барахтанье" вместо плавного плавания.
+-- !swim: включает полёт (BodyVelocity/BodyGyro, как в !orbit). Анимацию плавания
+-- проигрываем напрямую через Animator (стандартный ID R15-анимации плавания), а не
+-- через Humanoid:ChangeState(Swimming) — Roblox сам откатывает состояние Swimming
+-- обратно в GettingUp, если персонаж реально не в воде, и это давало мигание
+-- "включилось-выключилось" по кругу. Прямое проигрывание анимации никак не
+-- зависит от HumanoidStateType, поэтому не мигает.
 -- Пока владелец стоит на месте, бот кружит вокруг него по НАКЛОННОЙ орбите — это
 -- одно круговое движение и по горизонтали, и по вертикали одновременно (а не два
 -- независимых колебания), при этом высота всегда >= 0 относительно владельца,
@@ -396,6 +418,18 @@ local function startSwim(radius)
 
     enableFlyMode(myChar)
 
+    local hum = myChar:FindFirstChild("Humanoid")
+    if hum then
+        local animator = hum:FindFirstChildOfClass("Animator") or Instance.new("Animator", hum)
+        local swimAnim = Instance.new("Animation")
+        swimAnim.AnimationId = "rbxassetid://891639666" -- стандартная R15-анимация плавания
+        local track = animator:LoadAnimation(swimAnim)
+        track.Priority = Enum.AnimationPriority.Action4 -- перебивает обычную анимацию бега/падения
+        track.Looped = true
+        track:Play()
+        swimAnimationTrack = track
+    end
+
     local botIndex = getBotIndex()
     local angle = botIndex * GOLDEN_ANGLE
     local dist = radius or 4
@@ -404,15 +438,10 @@ local function startSwim(radius)
 
     currentTask = RunService.RenderStepped:Connect(function(dt)
         local hrp = myChar:FindFirstChild("HumanoidRootPart")
-        local hum = myChar:FindFirstChild("Humanoid")
         local ownerChar = owner.Character
         local ownerHRP = ownerChar and ownerChar:FindFirstChild("HumanoidRootPart")
 
-        if hrp and hum and ownerHRP then
-            if hum:GetState() ~= Enum.HumanoidStateType.Swimming then
-                hum:ChangeState(Enum.HumanoidStateType.Swimming)
-            end
-
+        if hrp and ownerHRP then
             local ownerIsMoving = lastOwnerPos and (ownerHRP.Position - lastOwnerPos).Magnitude > 0.05
             if not ownerIsMoving then
                 angle = angle + dt * FORMATION_IDLE_SPIN_SPEED
