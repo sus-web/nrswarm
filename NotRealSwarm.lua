@@ -66,6 +66,12 @@ local orbitRadius = 10
 local orbitSpeed = 2
 local followDistance = 5
 
+-- Формация вокруг владельца, чтобы боты не толпились в одной точке при follow/swim/orbit
+local FORMATION_HEIGHT_LAYERS = 3       -- сколько высотных "этажей" вокруг владельца
+local FORMATION_HEIGHT_STEP = 4         -- расстояние по Y между этажами (studs), всегда вверх — чтобы не уйти под пол
+local FORMATION_IDLE_SPIN_SPEED = 0.3   -- рад/сек — медленное кружение, пока владелец стоит на месте
+local GOLDEN_ANGLE = 2.399963229728653  -- ~137.5°, равномерно "рассыпает" ботов по кругу независимо от их числа
+
 math.randomseed(os.time())
 
 -- Функция остановки активных циклов
@@ -76,42 +82,58 @@ local function stopCurrentTask()
     end
 end
 
+-- Индекс текущего бота среди всех игроков сервера (нужен, чтобы разносить ботов в пространстве)
+local function getBotIndex()
+    local botIndex = 1
+    for i, player in ipairs(Players:GetPlayers()) do
+        if player == LocalPlayer then botIndex = i break end
+    end
+    return botIndex
+end
+
+-- Смещение от владельца для конкретного бота: по кругу (golden angle) и по высоте (этажи).
+-- Высота всегда >= 0, поэтому бот никогда не уходит под пол.
+local function getFormationOffset(botIndex, angle, radius)
+    local heightLayer = botIndex % FORMATION_HEIGHT_LAYERS
+    local x = math.cos(angle) * radius
+    local z = math.sin(angle) * radius
+    local y = heightLayer * FORMATION_HEIGHT_STEP
+    return Vector3.new(x, y, z)
+end
+
 -- ==========================================
--- 3. ЛОГИКА БОТА (ORBIT, FOLLOW, JUMP)
+-- 3. ЛОГИКА БОТА (ORBIT, FOLLOW/SWIM, JUMP, RESET)
 -- ==========================================
 
 local function startOrbit(radius, speed)
     stopCurrentTask()
-    
+
     local owner = Players:FindFirstChild(OWNER_NAME)
     if not owner or not owner.Character then return end
-    
+
     local randomDelay = math.random(0, 150) / 100
     local randomAngleOffset = math.random() * math.pi * 2
     local angle = 0
-    local botIndex = 1
+    local botIndex = getBotIndex()
     local allPlayers = Players:GetPlayers()
-    
-    for i, player in ipairs(allPlayers) do
-        if player == LocalPlayer then botIndex = i break end
-    end
-    
+    local heightOffset = (botIndex % FORMATION_HEIGHT_LAYERS) * FORMATION_HEIGHT_STEP
+
     task.wait(randomDelay)
-    
+
     currentTask = RunService.RenderStepped:Connect(function(dt)
         local myChar = LocalPlayer.Character
         local ownerHRP = owner.Character:FindFirstChild("HumanoidRootPart")
-        
+
         if myChar and myChar:FindFirstChild("HumanoidRootPart") and ownerHRP then
             angle = angle + (dt * (speed or 2))
             local offsetAngle = angle + (botIndex * (math.pi * 2 / #allPlayers)) + randomAngleOffset
-            
+
             local x = ownerHRP.Position.X + math.cos(offsetAngle) * (radius or 10)
             local z = ownerHRP.Position.Z + math.sin(offsetAngle) * (radius or 10)
-            
-            local targetPosition = Vector3.new(x, ownerHRP.Position.Y, z)
+
+            local targetPosition = Vector3.new(x, ownerHRP.Position.Y + heightOffset, z)
             local targetCFrame = CFrame.lookAt(targetPosition, ownerHRP.Position)
-            
+
             local tweenInfo = TweenInfo.new(0.05, Enum.EasingStyle.Linear)
             TweenService:Create(myChar.HumanoidRootPart, tweenInfo, {CFrame = targetCFrame}):Play()
         else
@@ -120,28 +142,58 @@ local function startOrbit(radius, speed)
     end)
 end
 
-local function startFollow(distance)
+-- Общая логика для !follow и !swim — Roblox сам переключает персонажа на плавание,
+-- когда тот оказывается в воде, поэтому отдельный код для плавания не нужен.
+-- Каждый бот держит свой слот в формации вокруг владельца (golden angle + высотный
+-- этаж), чтобы не толпиться в одной точке. Если владелец стоит на месте — слот
+-- медленно вращается вокруг него (это и есть "крутиться по орбите на месте").
+local function startFollow(radius)
     stopCurrentTask()
-    
+
     local owner = Players:FindFirstChild(OWNER_NAME)
     if not owner or not owner.Character then return end
-    
-    local dist = distance or 4
-    
-    currentTask = RunService.RenderStepped:Connect(function()
+
+    local botIndex = getBotIndex()
+    local angle = botIndex * GOLDEN_ANGLE
+    local dist = radius or 4
+    local lastOwnerPos = nil
+
+    currentTask = RunService.RenderStepped:Connect(function(dt)
         local myChar = LocalPlayer.Character
         local ownerChar = owner.Character
-        
+
         if myChar and myChar:FindFirstChild("Humanoid") and ownerChar and ownerChar:FindFirstChild("HumanoidRootPart") then
             local ownerHRP = ownerChar.HumanoidRootPart
             local myHRP = myChar:FindFirstChild("HumanoidRootPart")
-            
+
+            local ownerIsMoving = lastOwnerPos and (ownerHRP.Position - lastOwnerPos).Magnitude > 0.05
+            if not ownerIsMoving then
+                angle = angle + dt * FORMATION_IDLE_SPIN_SPEED
+            end
+            lastOwnerPos = ownerHRP.Position
+
             if myHRP then
-                local currentDist = (ownerHRP.Position - myHRP.Position).Magnitude
-                if currentDist > dist then
-                    myChar.Humanoid:MoveTo(ownerHRP.Position)
+                local targetPos = ownerHRP.Position + getFormationOffset(botIndex, angle, dist)
+                local currentDist = (targetPos - myHRP.Position).Magnitude
+                if currentDist > 2 then
+                    myChar.Humanoid:MoveTo(targetPos)
                 end
             end
+        else
+            stopCurrentTask()
+        end
+    end)
+end
+
+-- Непрерывный прыжок до команды !stop
+local function startJumping()
+    stopCurrentTask()
+
+    currentTask = RunService.Heartbeat:Connect(function()
+        local char = LocalPlayer.Character
+        local hum = char and char:FindFirstChild("Humanoid")
+        if hum then
+            hum.Jump = true
         else
             stopCurrentTask()
         end
@@ -280,13 +332,16 @@ SettingsPage:ColorPicker({
 -- Чтобы добавить новый алиас, просто впиши строку вида ["фраза"] = "!команда".
 local ARMY_ALIASES = {
     ["jump"] = "!jump",
+    ["jump!"] = "!jumping",
     ["follow me"] = "!follow",
     ["follow"] = "!follow",
+    ["swim"] = "!swim",
     ["orbit"] = "!orbit",
     ["stop"] = "!stop",
     ["stay"] = "!stop",
     ["halt"] = "!stop",
     ["assist"] = "!assist",
+    ["die"] = "!reset",
 }
 
 -- Игроки (ники в нижнем регистре), которым владелец временно выдал доступ к управлению через !assist
@@ -337,6 +392,8 @@ local function processCommand(msg, senderName)
     if command == "!jump" then
         local char = LocalPlayer.Character
         if char and char:FindFirstChild("Humanoid") then char.Humanoid.Jump = true end
+    elseif command == "!jumping" then
+        startJumping()
     elseif command == "!orbit" then
         local r = tonumber(args[2]) or orbitRadius
         local s = tonumber(args[3]) or orbitSpeed
@@ -344,11 +401,21 @@ local function processCommand(msg, senderName)
     elseif command == "!follow" then
         local d = tonumber(args[2]) or followDistance
         startFollow(d)
+    elseif command == "!swim" then
+        local d = tonumber(args[2]) or followDistance
+        startFollow(d)
     elseif command == "!stop" then
         stopCurrentTask()
         local char = LocalPlayer.Character
         if char and char:FindFirstChild("Humanoid") then
             char.Humanoid:MoveTo(char.HumanoidRootPart.Position)
+        end
+    elseif command == "!reset" then
+        stopCurrentTask()
+        local char = LocalPlayer.Character
+        local hum = char and char:FindFirstChild("Humanoid")
+        if hum then
+            hum.Health = 0
         end
     end
 end
