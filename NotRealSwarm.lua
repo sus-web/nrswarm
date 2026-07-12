@@ -73,6 +73,9 @@ local FORMATION_IDLE_SPIN_SPEED = 0.3   -- рад/сек — медленное 
 local GOLDEN_ANGLE = 2.399963229728653  -- ~137.5°, равномерно "рассыпает" ботов по кругу независимо от их числа
 local SWIM_VERTICAL_RATIO = 0.6         -- во сколько раз вертикальная орбита !swim медленнее горизонтальной
 local SWIM_VERTICAL_SCALE = 0.5         -- амплитуда вертикального колебания относительно радиуса
+local LINEUP_ROW_SIZE = 5               -- сколько ботов в одной шеренге по умолчанию
+local LINEUP_SPACING = 4                -- studs между соседними ботами в шеренге
+local LINEUP_ROW_GAP = 5                -- studs между шеренгами
 
 math.randomseed(os.time())
 
@@ -297,6 +300,60 @@ local function startSwim(radius)
     end)
 end
 
+-- !lineup: построить всех ботов в шеренги по rowSize человек (по умолчанию 5).
+-- Боты никак не общаются друг с другом — каждый видит один и тот же список игроков
+-- на сервере и независимо сортирует его по UserId (одинаковое число у всех
+-- клиентов), получая один и тот же порядок. Свой порядковый номер в этом списке и
+-- определяет ячейку (шеренга/место в шеренге) — так все сходятся на одной сетке,
+-- ничего не передавая друг другу.
+-- Сетка строится по фиксированным осям мира (не по развороту владельца в момент
+-- команды), чтобы не зависеть от того, в какой именно момент каждый бот считает
+-- команду — иначе из-за небольшой сетевой задержки повороты могли бы разойтись.
+local function startLineup(rowSize)
+    stopCurrentTask()
+
+    local owner = Players:FindFirstChild(OWNER_NAME)
+    if not owner or not owner.Character then return end
+    local ownerHRP = owner.Character:FindFirstChild("HumanoidRootPart")
+    if not ownerHRP then return end
+
+    local bots = {}
+    for _, player in ipairs(Players:GetPlayers()) do
+        if player.Name ~= OWNER_NAME then
+            table.insert(bots, player)
+        end
+    end
+    table.sort(bots, function(a, b) return a.UserId < b.UserId end)
+
+    local myRank = nil
+    for i, player in ipairs(bots) do
+        if player == LocalPlayer then myRank = i break end
+    end
+    if not myRank then return end
+
+    local size = rowSize or LINEUP_ROW_SIZE
+    local row = math.floor((myRank - 1) / size)
+    local col = (myRank - 1) % size
+    local colsInRow = math.min(size, #bots - row * size)
+
+    local anchor = ownerHRP.Position
+    local xOffset = (col - (colsInRow - 1) / 2) * LINEUP_SPACING
+    local zOffset = (row + 1) * LINEUP_ROW_GAP
+    local targetPos = anchor + Vector3.new(xOffset, 0, zOffset)
+
+    currentTask = RunService.RenderStepped:Connect(function()
+        local myChar = LocalPlayer.Character
+        if myChar and myChar:FindFirstChild("Humanoid") and myChar:FindFirstChild("HumanoidRootPart") then
+            local currentDist = (targetPos - myChar.HumanoidRootPart.Position).Magnitude
+            if currentDist > 2 then
+                myChar.Humanoid:MoveTo(targetPos)
+            end
+        else
+            stopCurrentTask()
+        end
+    end)
+end
+
 -- Непрерывный прыжок до команды !stop
 local function startJumping()
     stopCurrentTask()
@@ -448,6 +505,8 @@ local ARMY_ALIASES = {
     ["follow me"] = "!follow",
     ["follow"] = "!follow",
     ["swim"] = "!swim",
+    ["line up"] = "!lineup",
+    ["lineup"] = "!lineup",
     ["orbit"] = "!orbit",
     ["stop"] = "!stop",
     ["stay"] = "!stop",
@@ -516,6 +575,9 @@ local function processCommand(msg, senderName)
     elseif command == "!swim" then
         local d = tonumber(args[2]) or followDistance
         startSwim(d)
+    elseif command == "!lineup" then
+        local size = tonumber(args[2]) or LINEUP_ROW_SIZE
+        startLineup(size)
     elseif command == "!stop" then
         stopCurrentTask()
         local char = LocalPlayer.Character
