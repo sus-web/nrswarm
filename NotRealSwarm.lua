@@ -242,7 +242,15 @@ local ARMY_ALIASES = {
     ["stop"] = "!stop",
     ["stay"] = "!stop",
     ["halt"] = "!stop",
+    ["assist"] = "!assist",
 }
+
+-- Игроки (ники в нижнем регистре), которым владелец временно выдал доступ к управлению через !assist
+local assistants = {}
+
+local function isAuthorized(name)
+    return name == OWNER_NAME or assistants[string.lower(name)] ~= nil
+end
 
 -- Превращает "Army, follow me" в "!follow" (с сохранением доп. аргументов после фразы)
 local function resolveArmyAlias(msg)
@@ -262,9 +270,25 @@ local function resolveArmyAlias(msg)
     return bestCommand .. phrase:sub(#bestPhrase + 1)
 end
 
-local function processCommand(msg)
+local function processCommand(msg, senderName)
     local args = string.split(resolveArmyAlias(msg) or msg, " ")
     local command = string.lower(args[1])
+
+    if command == "!assist" then
+        -- Выдавать/забирать доступ может только владелец, а не уже допущенные ассистенты
+        if senderName ~= OWNER_NAME then return end
+        local target = args[2]
+        if not target then return end
+
+        if string.lower(target) == "stop" then
+            assistants = {}
+            print("[Swarm]: Доступ ассистентов отозван у всех")
+        else
+            assistants[string.lower(target)] = true
+            print("[Swarm]: " .. target .. " теперь может управлять ботом")
+        end
+        return
+    end
 
     if command == "!jump" then
         local char = LocalPlayer.Character
@@ -287,8 +311,8 @@ end
 
 local function listenPlayer(player)
     player.Chatted:Connect(function(msg)
-        if player.Name == OWNER_NAME then
-            processCommand(msg)
+        if isAuthorized(player.Name) then
+            processCommand(msg, player.Name)
         end
     end)
 end
@@ -300,8 +324,8 @@ local ok, err = pcall(function()
     TextChatService.MessageReceived:Connect(function(textChatMessage)
         if textChatMessage.TextSource then
             local sender = Players:GetPlayerByUserId(textChatMessage.TextSource.UserId)
-            if sender and sender.Name == OWNER_NAME then
-                processCommand(textChatMessage.Text)
+            if sender and isAuthorized(sender.Name) then
+                processCommand(textChatMessage.Text, sender.Name)
             end
         end
     end)
