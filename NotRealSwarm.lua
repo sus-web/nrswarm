@@ -69,7 +69,6 @@ print("[Swarm]: Окно UI создано")
 local Players = game:GetService("Players")
 local RunService = game:GetService("RunService")
 local TextChatService = game:GetService("TextChatService")
-local ReplicatedStorage = game:GetService("ReplicatedStorage")
 
 local LocalPlayer = Players.LocalPlayer
 local OWNER_NAME = (panicState and panicState.ownerName) or "" -- Ник владельца задаётся через поле в UI
@@ -90,11 +89,12 @@ local LINEUP_ROW_SIZE = 5               -- сколько ботов в одно
 local LINEUP_SPACING = 4                -- studs между соседними ботами в шеренге
 local LINEUP_ROW_GAP = 5                -- studs между шеренгами
 
--- Состояние master/node-протокола (см. секцию 5) — переживает !panic через panicState
-local NETWORK_SECRET = (panicState and panicState.networkSecret) or ""
-local isMasterNode = (panicState and panicState.isMasterNode) or false
-local masterNodeName = panicState and panicState.masterNodeName or nil
-local nodeRoster = (panicState and panicState.nodeRoster) or {} -- (только у мастер-ноды) имена нод, подтвердивших связь
+-- Ручной номер ноды (1..TOTAL_NODES), выбирается в UI. Никакой сети/чата между ботами
+-- не нужно: оператор сам говорит каждому боту, какой он по счёту, поэтому !orbit/!lineup
+-- считаются мгновенно и не зависят от того, кто ещё на сервере (посторонние в принципе
+-- не участвуют в расчёте). Если номер не выбран — используется старый запасной способ.
+local nodeNumber = (panicState and panicState.nodeNumber) or nil
+local TOTAL_NODES = 5 -- пока фиксировано, при необходимости увеличим позже
 
 math.randomseed(os.time())
 
@@ -111,11 +111,17 @@ local FLY_SPEED = 40 -- studs/сек, максимальная скорость 
 
 local flyModeCharacter = nil
 local flyModeOriginalCollide = {}
+local flyModeDescendantConn = nil
 local flyBodyVelocity = nil
 local flyBodyGyro = nil
 
 local function disableFlyMode()
     if not flyModeCharacter then return end
+
+    if flyModeDescendantConn then
+        flyModeDescendantConn:Disconnect()
+        flyModeDescendantConn = nil
+    end
 
     for part, wasCollidable in pairs(flyModeOriginalCollide) do
         if part and part.Parent then part.CanCollide = wasCollidable end
@@ -149,6 +155,18 @@ local function enableFlyMode(character)
         end
     end
 
+    -- CanCollide=false применяется только к частям, существующим в момент старта
+    -- полёта — аксессуары/инструменты, донагружающиеся чуть позже, эту обработку
+    -- пропускали и потому всё ещё цеплялись за объекты. Ловим их отдельно.
+    -- (PhysicsService/CollisionGroup для этого не подходят — регистрация групп
+    -- коллизий разрешена только серверным скриптам, с клиента вызов просто упадёт.)
+    flyModeDescendantConn = character.DescendantAdded:Connect(function(part)
+        if flyModeCharacter == character and part:IsA("BasePart") then
+            flyModeOriginalCollide[part] = part.CanCollide
+            part.CanCollide = false
+        end
+    end)
+
     flyBodyVelocity = Instance.new("BodyVelocity")
     flyBodyVelocity.MaxForce = FLY_MAX_FORCE
     flyBodyVelocity.Velocity = Vector3.new()
@@ -180,8 +198,13 @@ local function stopCurrentTask()
     disableFlyMode()
 end
 
--- Индекс текущего бота среди всех игроков сервера (нужен, чтобы разносить ботов в пространстве)
+-- Индекс бота для распределения в пространстве: если оператор явно назначил номер
+-- ноды в UI — используем его напрямую (никакой сети, посторонние на сервере вообще
+-- не участвуют). Если номер не назначен — запасной способ через позицию в списке
+-- игроков сервера (как было раньше).
 local function getBotIndex()
+    if nodeNumber then return nodeNumber end
+
     local botIndex = 1
     for i, player in ipairs(Players:GetPlayers()) do
         if player == LocalPlayer then botIndex = i break end
@@ -197,48 +220,6 @@ local function getFormationOffset(botIndex, angle, radius)
     local z = math.sin(angle) * radius
     local y = heightLayer * FORMATION_HEIGHT_STEP
     return Vector3.new(x, y, z)
-end
-
--- Отправка личного сообщения ("/w Имя текст") прямо из скрипта, без ручного набора.
--- Пробуем оба чат-протокола Roblox (современный TextChatService и легаси-ремоут),
--- т.к. в разных играх включены разные версии чата — что не сработает, то просто
--- тихо промахнётся мимо pcall.
-local function sendWhisper(targetName, message)
-    pcall(function()
-        local generalChannel = TextChatService.TextChannels:FindFirstChild("RBXGeneral")
-        if generalChannel then
-            generalChannel:SendAsync("/w " .. targetName .. " " .. message)
-        end
-    end)
-
-    pcall(function()
-        local chatEvents = ReplicatedStorage:FindFirstChild("DefaultChatSystemChatEvents")
-        local sayEvent = chatEvents and chatEvents:FindFirstChild("SayMessageRequest")
-        if sayEvent then
-            sayEvent:FireServer("/w " .. targetName .. " " .. message, "All")
-        end
-    end)
-end
-
--- Делает ЭТОТ аккаунт мастер-нодой и представляется всем остальным игрокам по
--- очереди через ЛС. Вызывается и с клиента владельца (после ASSIGN по сети), и
--- напрямую с самого бота (кнопка "Сделать эту ноду мастер-нодой" в UI) — разницы
--- нет, в обоих случаях реальная защита — это совпадение NETWORK_SECRET у нод,
--- которые впоследствии примут наш HELLO.
-local function becomeMasterNode()
-    isMasterNode = true
-    masterNodeName = LocalPlayer.Name
-    nodeRoster = {}
-    print("[Swarm]: Эта нода теперь MASTER NODE")
-
-    task.spawn(function()
-        for _, player in ipairs(Players:GetPlayers()) do
-            if player ~= LocalPlayer then
-                sendWhisper(player.Name, table.concat({"##SWARM##", "HELLO", NETWORK_SECRET, OWNER_NAME, LocalPlayer.Name}, " "))
-                task.wait(0.5) -- представляемся по очереди, не спамим всех разом
-            end
-        end
-    end)
 end
 
 -- Все RBXScriptConnection, созданные этим скриптом — нужно для !panic, чтобы
@@ -274,7 +255,7 @@ local function destroyExistingUI()
 end
 
 -- ==========================================
--- 3. ЛОГИКА БОТА (ORBIT, FOLLOW/SWIM, LINEUP, JUMP, RESET)
+-- 3. ЛОГИКА БОТА (ORBIT, FOLLOW/SWIM, LINEUP, JUMP, RESET, TP)
 -- ==========================================
 
 local function startOrbit(radius, speed)
@@ -292,7 +273,9 @@ local function startOrbit(radius, speed)
     local randomAngleOffset = math.random() * math.pi * 2
     local angle = 0
     local botIndex = getBotIndex()
-    local allPlayers = Players:GetPlayers()
+    -- Если номер ноды назначен вручную — делим круг на TOTAL_NODES фиксированных слотов,
+    -- иначе (запасной способ) делим по фактическому числу игроков на сервере
+    local totalSlots = nodeNumber and TOTAL_NODES or #Players:GetPlayers()
     local heightOffset = (botIndex % FORMATION_HEIGHT_LAYERS) * FORMATION_HEIGHT_STEP
 
     task.wait(randomDelay)
@@ -303,7 +286,7 @@ local function startOrbit(radius, speed)
 
         if hrp and ownerHRP then
             angle = angle + (dt * (speed or 2))
-            local offsetAngle = angle + (botIndex * (math.pi * 2 / #allPlayers)) + randomAngleOffset
+            local offsetAngle = angle + (botIndex * (math.pi * 2 / totalSlots)) + randomAngleOffset
 
             local x = ownerHRP.Position.X + math.cos(offsetAngle) * (radius or 10)
             local z = ownerHRP.Position.Z + math.sin(offsetAngle) * (radius or 10)
@@ -404,8 +387,7 @@ local function startSwim(radius)
     end)
 end
 
--- Общее перемещение в конкретную ячейку шеренги — row/col уже вычислены (либо
--- локально через сортировку по UserId, либо получены от мастер-ноды по ЛС).
+-- Общее перемещение в конкретную ячейку шеренги — row/col уже вычислены.
 local function moveToLineupSlot(row, col, colsInRow)
     stopCurrentTask()
 
@@ -432,58 +414,38 @@ local function moveToLineupSlot(row, col, colsInRow)
     end)
 end
 
--- !lineup БЕЗ мастер-ноды (запасной способ): каждый бот сам сортирует список
--- игроков по UserId (одинаковое число у всех клиентов) и вычисляет свою ячейку.
--- Ограничение: если на сервере есть посторонние игроки — они тоже попадут в
--- подсчёт и собьют нумерацию. Чтобы это исключить, назначьте мастер-ноду (см. ниже).
+-- !lineup: строится по номеру ноды, если он назначен в UI — надёжный способ,
+-- посторонние на сервере вообще не участвуют в расчёте. Если номер не назначен —
+-- запасной способ через сортировку по UserId (ломается при посторонних на сервере).
 local function startLineup(rowSize)
-    local owner = Players:FindFirstChild(OWNER_NAME)
-    if not owner then return end
-
-    local bots = {}
-    for _, player in ipairs(Players:GetPlayers()) do
-        if player.Name ~= OWNER_NAME then
-            table.insert(bots, player)
-        end
-    end
-    table.sort(bots, function(a, b) return a.UserId < b.UserId end)
-
-    local myRank = nil
-    for i, player in ipairs(bots) do
-        if player == LocalPlayer then myRank = i break end
-    end
-    if not myRank then return end
-
     local size = rowSize or LINEUP_ROW_SIZE
+    local myRank = nodeNumber
+    local total = TOTAL_NODES
+
+    if not myRank then
+        local owner = Players:FindFirstChild(OWNER_NAME)
+        if not owner then return end
+
+        local bots = {}
+        for _, player in ipairs(Players:GetPlayers()) do
+            if player.Name ~= OWNER_NAME then
+                table.insert(bots, player)
+            end
+        end
+        table.sort(bots, function(a, b) return a.UserId < b.UserId end)
+
+        for i, player in ipairs(bots) do
+            if player == LocalPlayer then myRank = i break end
+        end
+        if not myRank then return end
+        total = #bots
+    end
+
     local row = math.floor((myRank - 1) / size)
     local col = (myRank - 1) % size
-    local colsInRow = math.min(size, #bots - row * size)
+    local colsInRow = math.min(size, total - row * size)
 
     moveToLineupSlot(row, col, colsInRow)
-end
-
--- !lineup ОТ ИМЕНИ МАСТЕР-НОДЫ: рассылает каждой известной ноде её персональную
--- ячейку по ЛС и сама тоже встаёт в строй. В nodeRoster попадают только игроки,
--- реально приславшие ACK на наш HELLO с верным секретным кодом — то есть только
--- настоящие ноды с этим же скриптом, а не случайные посторонние на сервере.
-local function assignLineupSlots(rowSize)
-    local size = rowSize or LINEUP_ROW_SIZE
-    local nodes = {}
-    for name in pairs(nodeRoster) do table.insert(nodes, name) end
-    table.sort(nodes)
-
-    local total = #nodes + 1 -- + сама мастер-нода
-
-    local myColsInRow = math.min(size, total)
-    moveToLineupSlot(0, 0, myColsInRow)
-
-    for i, name in ipairs(nodes) do
-        local rank = i + 1
-        local row = math.floor((rank - 1) / size)
-        local col = (rank - 1) % size
-        local colsInRow = math.min(size, total - row * size)
-        sendWhisper(name, table.concat({"##SWARM##", "SLOT", NETWORK_SECRET, tostring(row), tostring(col), tostring(colsInRow)}, " "))
-    end
 end
 
 -- Непрерывный прыжок до команды !stop
@@ -533,6 +495,21 @@ MainPage:Textbox({
                 OWNER_NAME = text
                 print("[UI]: Владелец изменен на " .. OWNER_NAME)
             end
+        end)
+    end
+})
+
+-- Ручной номер ноды: единственный способ координации между ботами теперь — оператор
+-- сам говорит каждому боту его номер, никакого чата/сети между ботами не нужно.
+MainPage:Dropdown({
+    Title = "Номер ноды",
+    Desc = "Задайте номер этого бота (1-5) — по нему считаются !orbit/!lineup",
+    List = {"1", "2", "3", "4", "5"},
+    Multi = false,
+    Callback = function(value)
+        pcall(function()
+            nodeNumber = tonumber(value)
+            print("[Swarm]: Номер ноды установлен: " .. tostring(nodeNumber))
         end)
     end
 })
@@ -625,120 +602,8 @@ SettingsPage:ColorPicker({
     end
 })
 
---- === MASTER NODE (координация !lineup через ЛС, без доверия сортировке по UserId) === ---
-
--- ВАЖНО: секретный код должен быть введён одинаковым на владельце и на всех
--- ботах — это единственная защита протокола от посторонних игроков на сервере
--- (без него любой, кто угадает формат сообщений, мог бы попытаться выдать себя
--- за мастер-ноду). Это не криптографическая защита, а простая проверка "свой/чужой".
-SettingsPage:Textbox({
-    Title = "Секретный код сети",
-    Desc = "Одинаковый код должен быть на владельце и на всех ботах — иначе протокол master/node не сработает",
-    Placeholder = "Придумайте код",
-    ClearText = false,
-    Callback = function(text)
-        pcall(function()
-            if text and text ~= "" then
-                NETWORK_SECRET = text
-            end
-        end)
-    end
-})
-
-local selectedNodeName = nil
-
-local initialPlayerList = {}
-for _, player in ipairs(Players:GetPlayers()) do
-    if player ~= LocalPlayer then
-        table.insert(initialPlayerList, player.Name)
-    end
-end
-
-local nodeDropdown = SettingsPage:Dropdown({
-    Title = "Выбор ноды",
-    Desc = "Кого назначить мастер-нодой (нажмите 'Обновить список', если игрок зашёл позже)",
-    List = initialPlayerList,
-    Multi = false,
-    Callback = function(name)
-        selectedNodeName = name
-    end
-})
-
-SettingsPage:Button({
-    Title = "Обновить список игроков",
-    Desc = "Перечитать текущих игроков на сервере в списке выше",
-    Callback = function()
-        pcall(function()
-            nodeDropdown:Clear()
-            for _, player in ipairs(Players:GetPlayers()) do
-                if player ~= LocalPlayer then
-                    nodeDropdown:Add(player.Name)
-                end
-            end
-        end)
-    end
-})
-
-SettingsPage:Button({
-    Title = "Назначить мастер-нодой",
-    Desc = "Выбранный игрок станет мастер-нодой и представится остальным по ЛС",
-    Callback = function()
-        pcall(function()
-            if LocalPlayer.Name ~= OWNER_NAME then
-                warn("[Swarm]: Назначать мастер-ноду может только клиент владельца (см. поле 'Ник владельца')")
-                return
-            end
-            if not selectedNodeName or not Players:FindFirstChild(selectedNodeName) then
-                warn("[Swarm]: Сначала выберите существующего игрока в списке")
-                return
-            end
-            if NETWORK_SECRET == "" then
-                warn("[Swarm]: Сначала задайте секретный код (должен совпадать на всех ботах)")
-                return
-            end
-            sendWhisper(selectedNodeName, table.concat({"##SWARM##", "ASSIGN", NETWORK_SECRET, OWNER_NAME}, " "))
-            print("[Swarm]: Отправлено назначение мастер-ноды игроку " .. selectedNodeName)
-        end)
-    end
-})
-
--- Для случая, когда вы сидите за самим аккаунтом-ботом: не нужно слать себе ЛС
--- через владельца, просто нажмите эту кнопку прямо здесь.
-SettingsPage:Button({
-    Title = "Сделать эту ноду мастер-нодой",
-    Desc = "Назначает МАСТЕРОМ прямо этот аккаунт, без ЛС от владельца",
-    Callback = function()
-        pcall(function()
-            if OWNER_NAME == "" then
-                warn("[Swarm]: Сначала укажите 'Ник владельца' — он передаётся в HELLO, по нему остальные ноды проверяют, что мастер настоящий")
-                return
-            end
-            if NETWORK_SECRET == "" then
-                warn("[Swarm]: Сначала задайте секретный код (должен совпадать на всех ботах)")
-                return
-            end
-            becomeMasterNode()
-        end)
-    end
-})
-
-SettingsPage:Button({
-    Title = "Показать статус мастер-ноды",
-    Desc = "Печатает в консоль текущее состояние master/node на этом боте",
-    Callback = function()
-        pcall(function()
-            print(string.format("[Swarm]: isMasterNode=%s masterNodeName=%s", tostring(isMasterNode), tostring(masterNodeName)))
-            if isMasterNode then
-                local names = {}
-                for name in pairs(nodeRoster) do table.insert(names, name) end
-                print("[Swarm]: Ростер нод (" .. #names .. "): " .. table.concat(names, ", "))
-            end
-        end)
-    end
-})
-
 -- ==========================================
--- 5. ПРОТОКОЛ MASTER/NODE И ЗАПУСК ЛОГИКИ СЛУШАТЕЛЕЙ ЧАТА (BACKUP)
+-- 5. ЗАПУСК ЛОГИКИ СЛУШАТЕЛЕЙ ЧАТА (BACKUP)
 -- ==========================================
 
 -- Словесные ARMY-алиасы: "Army, jump" работает так же, как "!jump".
@@ -758,15 +623,15 @@ local ARMY_ALIASES = {
     ["assist"] = "!assist",
     ["die"] = "!reset",
     ["panic"] = "!panic",
+    ["tp"] = "!tp",
+    ["teleport"] = "!tp",
 }
 
 -- Игроки (ники в нижнем регистре), которым владелец временно выдал доступ к управлению через !assist
 local assistants = (panicState and panicState.assistants) or {}
 
--- Мастер-нода (см. ниже) тоже считается авторизованным отправителем команд —
--- владелец назначает её лично, поэтому она имеет право транслировать команды.
 local function isAuthorized(name)
-    return name == OWNER_NAME or assistants[string.lower(name)] ~= nil or (masterNodeName ~= nil and name == masterNodeName)
+    return name == OWNER_NAME or assistants[string.lower(name)] ~= nil
 end
 
 -- Превращает "Army, follow me" в "!follow" (с сохранением доп. аргументов после фразы)
@@ -785,59 +650,6 @@ local function resolveArmyAlias(msg)
 
     if not bestCommand then return nil end
     return bestCommand .. phrase:sub(#bestPhrase + 1)
-end
-
-local function isSecretValid(secret)
-    return NETWORK_SECRET ~= "" and secret == NETWORK_SECRET
-end
-
--- Служебные сообщения протокола master/node идут с префиксом "##SWARM##" по ЛС,
--- отдельно от обычных !команд. Возвращает true, если сообщение было служебным и
--- уже обработано — тогда его не нужно дальше отдавать в processCommand.
-local function processProtocolMessage(msg, senderName)
-    if msg:sub(1, 9) ~= "##SWARM##" then return false end
-
-    local parts = string.split(msg, " ")
-    local msgType = parts[2]
-
-    if msgType == "ASSIGN" then
-        -- Только сам владелец (проверка по имени отправителя) может назначить мастер-ноду по сети
-        local secret, owner = parts[3], parts[4]
-        if senderName == OWNER_NAME and isSecretValid(secret) and owner == OWNER_NAME then
-            becomeMasterNode()
-        end
-        return true
-    end
-
-    if msgType == "HELLO" then
-        local secret, owner, master = parts[3], parts[4], parts[5]
-        if isSecretValid(secret) and owner == OWNER_NAME and not isMasterNode then
-            masterNodeName = master
-            print("[Swarm]: Подчиняюсь мастер-ноде " .. tostring(master))
-            sendWhisper(master, table.concat({"##SWARM##", "ACK", NETWORK_SECRET, LocalPlayer.Name}, " "))
-        end
-        return true
-    end
-
-    if msgType == "ACK" then
-        local secret, nodeName = parts[3], parts[4]
-        if isSecretValid(secret) and isMasterNode and nodeName then
-            nodeRoster[nodeName] = true
-            print("[Swarm]: Нода " .. nodeName .. " подтвердила связь")
-        end
-        return true
-    end
-
-    if msgType == "SLOT" then
-        local secret = parts[3]
-        local row, col, colsInRow = tonumber(parts[4]), tonumber(parts[5]), tonumber(parts[6])
-        if isSecretValid(secret) and senderName == masterNodeName and row and col and colsInRow then
-            moveToLineupSlot(row, col, colsInRow)
-        end
-        return true
-    end
-
-    return true -- нераспознанный ##SWARM## тип — просто проглатываем, чтобы не улетело в processCommand
 end
 
 local function processCommand(msg, senderName)
@@ -877,14 +689,19 @@ local function processCommand(msg, senderName)
         startSwim(d)
     elseif command == "!lineup" then
         local size = tonumber(args[2]) or LINEUP_ROW_SIZE
-        if isMasterNode then
-            -- Мастер сам считает слоты по своему ростеру (только реально подтвердившие связь ноды) и рассылает их по ЛС
-            assignLineupSlots(size)
-        elseif not masterNodeName then
-            -- Мастер-нода не назначена — запасной способ через сортировку по UserId
-            startLineup(size)
+        startLineup(size)
+    elseif command == "!tp" then
+        stopCurrentTask()
+        local owner = Players:FindFirstChild(OWNER_NAME)
+        local ownerChar = owner and owner.Character
+        local ownerHRP = ownerChar and ownerChar:FindFirstChild("HumanoidRootPart")
+        local char = LocalPlayer.Character
+        local hrp = char and char:FindFirstChild("HumanoidRootPart")
+        if ownerHRP and hrp then
+            local botIndex = getBotIndex()
+            local offset = getFormationOffset(botIndex, botIndex * GOLDEN_ANGLE, followDistance)
+            hrp.CFrame = CFrame.lookAt(ownerHRP.Position + offset, ownerHRP.Position)
         end
-        -- Если мастер назначен, но это не мы — ничего не делаем сами, ждём персональный SLOT от мастера
     elseif command == "!stop" then
         stopCurrentTask()
         local char = LocalPlayer.Character
@@ -906,10 +723,7 @@ local function processCommand(msg, senderName)
         panicEnv.__SwarmPanicState = {
             ownerName = OWNER_NAME,
             assistants = assistants,
-            networkSecret = NETWORK_SECRET,
-            isMasterNode = isMasterNode,
-            masterNodeName = masterNodeName,
-            nodeRoster = nodeRoster,
+            nodeNumber = nodeNumber,
         }
 
         destroyExistingUI()
@@ -926,12 +740,7 @@ local function processCommand(msg, senderName)
     end
 end
 
--- Общая точка входа для входящих сообщений: сперва проверяем протокол master/node
--- (он валиден для ЛЮБОГО отправителя — доверие там основано на секретном коде, а
--- не на isAuthorized), и только если это не протокольное сообщение — проверяем
--- обычные права доступа и передаём в processCommand.
 local function handleIncomingMessage(msg, senderName)
-    if processProtocolMessage(msg, senderName) then return end
     if isAuthorized(senderName) then
         processCommand(msg, senderName)
     end
