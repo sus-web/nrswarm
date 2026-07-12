@@ -89,12 +89,49 @@ local LINEUP_ROW_SIZE = 5               -- сколько ботов в одно
 local LINEUP_SPACING = 4                -- studs между соседними ботами в шеренге
 local LINEUP_ROW_GAP = 5                -- studs между шеренгами
 
--- Ручной номер ноды (1..TOTAL_NODES), выбирается в UI. Никакой сети/чата между ботами
--- не нужно: оператор сам говорит каждому боту, какой он по счёту, поэтому !orbit/!lineup
--- считаются мгновенно и не зависят от того, кто ещё на сервере (посторонние в принципе
--- не участвуют в расчёте). Если номер не выбран — используется старый запасной способ.
-local nodeNumber = (panicState and panicState.nodeNumber) or nil
+-- Ники ВСЕХ нод в фиксированном порядке (1..TOTAL_NODES) — одинаковый список
+-- вводится вручную один раз на каждом боте. Никакой сети/чата между ботами не
+-- нужно: по этому списку каждая нода узнаёт (1) свой собственный номер — находит
+-- своё имя в списке, и (2) ник ЛЮБОЙ ДРУГОЙ ноды по номеру, а значит и её
+-- персонажа/позицию (Players:FindFirstChild(name) — позиции персонажей и так
+-- реплицируются всем клиентам как обычно, никакой отдельной синхронизации не нужно).
 local TOTAL_NODES = 5 -- пока фиксировано, при необходимости увеличим позже
+local nodeRosterText = (panicState and panicState.nodeRosterText) or ""
+local nodeRoster = {} -- [number] = "Ник"
+
+local function parseNodeRoster(text)
+    local roster = {}
+    local index = 0
+    for name in (text or ""):gmatch("[^,]+") do
+        index = index + 1
+        if index > TOTAL_NODES then break end
+        local trimmed = name:match("^%s*(.-)%s*$")
+        if trimmed ~= "" then
+            roster[index] = trimmed
+        end
+    end
+    return roster
+end
+
+nodeRoster = parseNodeRoster(nodeRosterText)
+
+-- Собственный номер ноды — находим себя в ростере по своему нику (регистронезависимо)
+local function detectOwnNodeNumber()
+    for number, name in pairs(nodeRoster) do
+        if string.lower(name) == string.lower(LocalPlayer.Name) then
+            return number
+        end
+    end
+    return nil
+end
+
+local nodeNumber = detectOwnNodeNumber()
+
+-- Игрок конкретной ноды по номеру (nil, если её сейчас нет на сервере или номер не задан в ростере)
+local function getNodePlayer(number)
+    local name = nodeRoster[number]
+    return name and Players:FindFirstChild(name)
+end
 
 math.randomseed(os.time())
 
@@ -499,17 +536,21 @@ MainPage:Textbox({
     end
 })
 
--- Ручной номер ноды: единственный способ координации между ботами теперь — оператор
--- сам говорит каждому боту его номер, никакого чата/сети между ботами не нужно.
-MainPage:Dropdown({
-    Title = "Номер ноды",
-    Desc = "Задайте номер этого бота (1-5) — по нему считаются !orbit/!lineup",
-    List = {"1", "2", "3", "4", "5"},
-    Multi = false,
-    Callback = function(value)
+-- Ники всех нод: единственный способ координации между ботами теперь — этот
+-- список одинаково вводится на КАЖДОМ боте, и каждый сам находит себя в нём.
+MainPage:Textbox({
+    Title = "Ники нод (по порядку, через запятую)",
+    Desc = "Одинаковый список на каждом боте: Node1,Node2,Node3,Node4,Node5 — так все ноды знают ники друг друга",
+    Placeholder = "Bot1,Bot2,Bot3,Bot4,Bot5",
+    ClearText = false,
+    Callback = function(text)
         pcall(function()
-            nodeNumber = tonumber(value)
-            print("[Swarm]: Номер ноды установлен: " .. tostring(nodeNumber))
+            if text and text ~= "" then
+                nodeRosterText = text
+                nodeRoster = parseNodeRoster(text)
+                nodeNumber = detectOwnNodeNumber()
+                print("[Swarm]: Ростер обновлён. Мой номер ноды: " .. tostring(nodeNumber))
+            end
         end)
     end
 })
@@ -598,6 +639,19 @@ SettingsPage:ColorPicker({
     Callback = function(r, g, b)
         pcall(function()
             print(string.format("[UI ColorPicker]: R:%d G:%d B:%d", r, g, b))
+        end)
+    end
+})
+
+SettingsPage:Button({
+    Title = "Показать ростер нод",
+    Desc = "Печатает в консоль список нод и свой определённый номер",
+    Callback = function()
+        pcall(function()
+            for i = 1, TOTAL_NODES do
+                print(string.format("[Swarm]: Node %d = %s", i, tostring(nodeRoster[i])))
+            end
+            print("[Swarm]: Мой номер ноды: " .. tostring(nodeNumber))
         end)
     end
 })
@@ -723,7 +777,7 @@ local function processCommand(msg, senderName)
         panicEnv.__SwarmPanicState = {
             ownerName = OWNER_NAME,
             assistants = assistants,
-            nodeNumber = nodeNumber,
+            nodeRosterText = nodeRosterText,
         }
 
         destroyExistingUI()
