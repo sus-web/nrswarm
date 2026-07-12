@@ -83,7 +83,7 @@ local FORMATION_HEIGHT_LAYERS = 3       -- сколько высотных "эт
 local FORMATION_HEIGHT_STEP = 4         -- расстояние по Y между этажами (studs), всегда вверх — чтобы не уйти под пол
 local FORMATION_IDLE_SPIN_SPEED = 0.3   -- рад/сек — медленное кружение, пока владелец стоит на месте
 local GOLDEN_ANGLE = 2.399963229728653  -- ~137.5°, равномерно "рассыпает" ботов по кругу независимо от их числа
-local SWIM_SPIN_SPEED = FORMATION_IDLE_SPIN_SPEED / 3 -- горизонтальное кружение тоже втрое медленнее
+local SWIM_SPIN_SPEED = FORMATION_IDLE_SPIN_SPEED / 2 -- горизонтальное кружение тоже медленнее обычного
 local SWIM_VERTICAL_SPEED = 0.4         -- рад/сек — независимое вертикальное колебание (не привязано к горизонтали)
 local LINEUP_ROW_SIZE = 5               -- сколько ботов в одной шеренге по умолчанию
 local LINEUP_SPACING = 4                -- studs между соседними ботами в шеренге
@@ -145,7 +145,7 @@ math.randomseed(os.time())
 local FLY_MAX_FORCE = Vector3.new(1e6, 1e6, 1e6)
 local FLY_MAX_TORQUE = Vector3.new(1e6, 1e6, 1e6)
 local FLY_SPEED = 40 -- studs/сек, максимальная скорость полёта
-local SWIM_SPEED = FLY_SPEED / 3 -- !swim двигается втрое медленнее обычного полёта
+local SWIM_SPEED = FLY_SPEED / 2 -- !swim двигается медленнее обычного полёта
 
 local flyModeCharacter = nil
 local flyModeOriginalCollide = {}
@@ -235,15 +235,19 @@ local function flyTo(hrp, targetPosition, lookAtPosition, maxSpeed)
     flyBodyGyro.CFrame = CFrame.lookAt(hrp.Position, lookAtPosition)
 end
 
--- Анимация плавания для !swim — см. ниже, почему это отдельная анимация, а не
--- Humanoid:ChangeState(Swimming)
-local swimAnimationTrack = nil
+-- Анимация плавания для !swim: держим Humanoid в состоянии Swimming принудительно
+-- КАЖДЫЙ кадр через отдельный Heartbeat (не только когда он уже сбился, а всегда,
+-- безусловно) — иначе движок Roblox откатывает состояние обратно в GettingUp/
+-- Freefall, т.к. персонаж реально не в воде. Раз состояние держится непрерывно,
+-- встроенный скрипт анимации персонажа сам проигрывает правильную анимацию
+-- (swimidle/swim) в зависимости от того, реально ли персонаж сейчас движется —
+-- поэтому свою анимацию грузить не нужно, это сделает стандартный Animate-скрипт.
+local swimStateConnection = nil
 
-local function stopSwimAnimation()
-    if swimAnimationTrack then
-        swimAnimationTrack:Stop()
-        swimAnimationTrack:Destroy()
-        swimAnimationTrack = nil
+local function stopSwimStateForce()
+    if swimStateConnection then
+        swimStateConnection:Disconnect()
+        swimStateConnection = nil
     end
 end
 
@@ -254,7 +258,7 @@ local function stopCurrentTask()
         currentTask = nil
     end
     disableFlyMode()
-    stopSwimAnimation()
+    stopSwimStateForce()
 end
 
 -- Индекс бота для распределения в пространстве: если оператор явно назначил номер
@@ -400,15 +404,13 @@ local function startFollow(radius)
     end)
 end
 
--- !swim: включает полёт (BodyVelocity/BodyGyro, как в !orbit), но втрое медленнее.
--- Анимацию плавания проигрываем напрямую через Animator (rbxassetid://507784897 —
--- стандартная активная R15-анимация "swim" с гребком руками/ногами; есть похожий
--- ID 507785072 "swimidle" — это неподвижное топтание на месте, его не используем,
--- это и выглядело как "просто крутится с idle-анимацией"), а не через
--- Humanoid:ChangeState(Swimming) — Roblox сам откатывает состояние Swimming обратно
--- в GettingUp, если персонаж реально не в воде, и это давало мигание
--- "включилось-выключилось" по кругу. Прямое проигрывание анимации никак не
--- зависит от HumanoidStateType, поэтому не мигает.
+-- !swim: включает полёт (BodyVelocity/BodyGyro, как в !orbit), но медленнее.
+-- Состояние Swimming держим принудительно КАЖДЫЙ кадр через отдельный Heartbeat,
+-- безусловно (не только когда оно уже сбилось) — движок Roblox иначе откатывает
+-- его обратно в GettingUp/Freefall на следующем же кадре, т.к. персонаж реально не
+-- в воде. При непрерывном удержании состояния встроенный Animate-скрипт персонажа
+-- сам проигрывает нужную анимацию (swimidle, когда почти не двигается, и swim с
+-- гребком руками/ногами, когда реально плывёт) — свою анимацию грузить не нужно.
 -- Горизонтальное кружение вокруг владельца включается, только пока он стоит на
 -- месте (как и раньше). Вертикальное покачивание — ОТДЕЛЬНОЕ, независимое от
 -- горизонтального угла и идёт постоянно (даже когда владелец движется), поэтому
@@ -425,17 +427,13 @@ local function startSwim(radius)
 
     enableFlyMode(myChar)
 
-    local hum = myChar:FindFirstChild("Humanoid")
-    if hum then
-        local animator = hum:FindFirstChildOfClass("Animator") or Instance.new("Animator", hum)
-        local swimAnim = Instance.new("Animation")
-        swimAnim.AnimationId = "rbxassetid://507784897" -- активная R15-анимация "swim" (гребок), не "swimidle"
-        local track = animator:LoadAnimation(swimAnim)
-        track.Priority = Enum.AnimationPriority.Action4 -- перебивает обычную анимацию бега/падения
-        track.Looped = true
-        track:Play()
-        swimAnimationTrack = track
-    end
+    swimStateConnection = RunService.Heartbeat:Connect(function()
+        local char = LocalPlayer.Character
+        local hum = char and char:FindFirstChildOfClass("Humanoid")
+        if hum then
+            hum:ChangeState(Enum.HumanoidStateType.Swimming)
+        end
+    end)
 
     local botIndex = getBotIndex()
     local horizontalAngle = botIndex * GOLDEN_ANGLE
