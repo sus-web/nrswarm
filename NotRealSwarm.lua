@@ -83,6 +83,8 @@ local FORMATION_HEIGHT_LAYERS = 3       -- сколько высотных "эт
 local FORMATION_HEIGHT_STEP = 4         -- расстояние по Y между этажами (studs), всегда вверх — чтобы не уйти под пол
 local FORMATION_IDLE_SPIN_SPEED = 0.3   -- рад/сек — медленное кружение, пока владелец стоит на месте
 local GOLDEN_ANGLE = 2.399963229728653  -- ~137.5°, равномерно "рассыпает" ботов по кругу независимо от их числа
+local SWIM_SPIN_SPEED = FORMATION_IDLE_SPIN_SPEED / 3 -- горизонтальное кружение тоже втрое медленнее
+local SWIM_VERTICAL_SPEED = 0.4         -- рад/сек — независимое вертикальное колебание (не привязано к горизонтали)
 local LINEUP_ROW_SIZE = 5               -- сколько ботов в одной шеренге по умолчанию
 local LINEUP_SPACING = 4                -- studs между соседними ботами в шеренге
 local LINEUP_ROW_GAP = 5                -- studs между шеренгами
@@ -143,6 +145,7 @@ math.randomseed(os.time())
 local FLY_MAX_FORCE = Vector3.new(1e6, 1e6, 1e6)
 local FLY_MAX_TORQUE = Vector3.new(1e6, 1e6, 1e6)
 local FLY_SPEED = 40 -- studs/сек, максимальная скорость полёта
+local SWIM_SPEED = FLY_SPEED / 3 -- !swim двигается втрое медленнее обычного полёта
 
 local flyModeCharacter = nil
 local flyModeOriginalCollide = {}
@@ -219,7 +222,7 @@ end
 -- Разово выставленный CanCollide=false может быть сброшен движком/чужими скриптами —
 -- поэтому переустанавливаем его каждый кадр на всех частях персонажа, а не только
 -- один раз при входе в полёт (стандартная практика для клиентского noclip).
-local function flyTo(hrp, targetPosition, lookAtPosition)
+local function flyTo(hrp, targetPosition, lookAtPosition, maxSpeed)
     if not flyBodyVelocity or not flyBodyGyro then return end
 
     for part in pairs(flyModeOriginalCollide) do
@@ -228,7 +231,7 @@ local function flyTo(hrp, targetPosition, lookAtPosition)
 
     local toTarget = targetPosition - hrp.Position
     local dist = toTarget.Magnitude
-    flyBodyVelocity.Velocity = dist > 0.05 and (toTarget.Unit * math.min(dist * 4, FLY_SPEED)) or Vector3.new()
+    flyBodyVelocity.Velocity = dist > 0.05 and (toTarget.Unit * math.min(dist * 4, maxSpeed or FLY_SPEED)) or Vector3.new()
     flyBodyGyro.CFrame = CFrame.lookAt(hrp.Position, lookAtPosition)
 end
 
@@ -397,16 +400,20 @@ local function startFollow(radius)
     end)
 end
 
--- !swim: включает полёт (BodyVelocity/BodyGyro, как в !orbit). Анимацию плавания
--- проигрываем напрямую через Animator (стандартный ID R15-анимации плавания), а не
--- через Humanoid:ChangeState(Swimming) — Roblox сам откатывает состояние Swimming
--- обратно в GettingUp, если персонаж реально не в воде, и это давало мигание
+-- !swim: включает полёт (BodyVelocity/BodyGyro, как в !orbit), но втрое медленнее.
+-- Анимацию плавания проигрываем напрямую через Animator (rbxassetid://507784897 —
+-- стандартная активная R15-анимация "swim" с гребком руками/ногами; есть похожий
+-- ID 507785072 "swimidle" — это неподвижное топтание на месте, его не используем,
+-- это и выглядело как "просто крутится с idle-анимацией"), а не через
+-- Humanoid:ChangeState(Swimming) — Roblox сам откатывает состояние Swimming обратно
+-- в GettingUp, если персонаж реально не в воде, и это давало мигание
 -- "включилось-выключилось" по кругу. Прямое проигрывание анимации никак не
 -- зависит от HumanoidStateType, поэтому не мигает.
--- Пока владелец стоит на месте, бот кружит вокруг него по НАКЛОННОЙ орбите — это
--- одно круговое движение и по горизонтали, и по вертикали одновременно (а не два
--- независимых колебания), при этом высота всегда >= 0 относительно владельца,
--- чтобы бот не ушёл под пол.
+-- Горизонтальное кружение вокруг владельца включается, только пока он стоит на
+-- месте (как и раньше). Вертикальное покачивание — ОТДЕЛЬНОЕ, независимое от
+-- горизонтального угла и идёт постоянно (даже когда владелец движется), поэтому
+-- это выглядит как настоящее плавание в объёме, а не один плоский/наклонный круг.
+-- Высота всегда >= 0 относительно владельца, чтобы бот не ушёл под пол.
 local function startSwim(radius)
     stopCurrentTask()
 
@@ -422,7 +429,7 @@ local function startSwim(radius)
     if hum then
         local animator = hum:FindFirstChildOfClass("Animator") or Instance.new("Animator", hum)
         local swimAnim = Instance.new("Animation")
-        swimAnim.AnimationId = "rbxassetid://891639666" -- стандартная R15-анимация плавания
+        swimAnim.AnimationId = "rbxassetid://507784897" -- активная R15-анимация "swim" (гребок), не "swimidle"
         local track = animator:LoadAnimation(swimAnim)
         track.Priority = Enum.AnimationPriority.Action4 -- перебивает обычную анимацию бега/падения
         track.Looped = true
@@ -431,9 +438,10 @@ local function startSwim(radius)
     end
 
     local botIndex = getBotIndex()
-    local angle = botIndex * GOLDEN_ANGLE
+    local horizontalAngle = botIndex * GOLDEN_ANGLE
+    local verticalAngle = botIndex * GOLDEN_ANGLE * 1.7 -- своя фаза, чтобы не совпадать с горизонтальным углом
     local dist = radius or 4
-    local tilt = math.pi / 6 + (botIndex % 3) * (math.pi / 12) -- 30°/45°/60° наклон орбиты — разный у разных ботов
+    local verticalAmplitude = dist * 0.75
     local lastOwnerPos = nil
 
     currentTask = RunService.RenderStepped:Connect(function(dt)
@@ -444,16 +452,16 @@ local function startSwim(radius)
         if hrp and ownerHRP then
             local ownerIsMoving = lastOwnerPos and (ownerHRP.Position - lastOwnerPos).Magnitude > 0.05
             if not ownerIsMoving then
-                angle = angle + dt * FORMATION_IDLE_SPIN_SPEED
+                horizontalAngle = horizontalAngle + dt * SWIM_SPIN_SPEED
             end
+            verticalAngle = verticalAngle + dt * SWIM_VERTICAL_SPEED -- вертикальное покачивание не прерывается
             lastOwnerPos = ownerHRP.Position
 
-            local x = math.cos(angle) * dist
-            local depth = math.sin(angle) * dist
-            local z = depth * math.cos(tilt)
-            local y = depth * math.sin(tilt) + dist * math.sin(tilt) -- сдвиг вверх: y всегда в [0, 2*dist*sin(tilt)]
+            local x = math.cos(horizontalAngle) * dist
+            local z = math.sin(horizontalAngle) * dist
+            local y = (math.sin(verticalAngle) + 1) / 2 * verticalAmplitude -- диапазон [0, verticalAmplitude]
             local targetPosition = ownerHRP.Position + Vector3.new(x, y, z)
-            flyTo(hrp, targetPosition, ownerHRP.Position)
+            flyTo(hrp, targetPosition, ownerHRP.Position, SWIM_SPEED)
         else
             stopCurrentTask()
         end
