@@ -71,8 +71,65 @@ local FORMATION_HEIGHT_LAYERS = 3       -- сколько высотных "эт
 local FORMATION_HEIGHT_STEP = 4         -- расстояние по Y между этажами (studs), всегда вверх — чтобы не уйти под пол
 local FORMATION_IDLE_SPIN_SPEED = 0.3   -- рад/сек — медленное кружение, пока владелец стоит на месте
 local GOLDEN_ANGLE = 2.399963229728653  -- ~137.5°, равномерно "рассыпает" ботов по кругу независимо от их числа
+local SWIM_VERTICAL_RATIO = 0.6         -- во сколько раз вертикальная орбита !swim медленнее горизонтальной
+local SWIM_VERTICAL_SCALE = 0.5         -- амплитуда вертикального колебания относительно радиуса
 
 math.randomseed(os.time())
+
+-- "Полёт" для !orbit/!swim: якорим HumanoidRootPart и отключаем коллизии, чтобы
+-- Humanoid (гравитация, состояния Running/Freefall) не боролся с принудительным
+-- перемещением через CFrame — именно из-за этой борьбы персонажа в воздухе дёргает
+-- и цепляет за объекты. Восстанавливаем всё через disableFlyMode при остановке.
+local flyModeCharacter = nil
+local flyModeOriginalCollide = {}
+
+local function enableFlyMode(character)
+    if flyModeCharacter == character then return end
+    if flyModeCharacter then
+        -- Другой персонаж всё ещё числится "летающим" (например, после респавна) — сначала сбросим его
+        local oldHrp = flyModeCharacter:FindFirstChild("HumanoidRootPart")
+        local oldHum = flyModeCharacter:FindFirstChild("Humanoid")
+        for part, wasCollidable in pairs(flyModeOriginalCollide) do
+            if part and part.Parent then part.CanCollide = wasCollidable end
+        end
+        flyModeOriginalCollide = {}
+        if oldHrp then oldHrp.Anchored = false end
+        if oldHum then oldHum:ChangeState(Enum.HumanoidStateType.GettingUp) end
+    end
+
+    local hrp = character and character:FindFirstChild("HumanoidRootPart")
+    local hum = character and character:FindFirstChild("Humanoid")
+    if not hrp or not hum then return end
+
+    hum:ChangeState(Enum.HumanoidStateType.Physics)
+    hrp.Anchored = true
+
+    flyModeOriginalCollide = {}
+    for _, part in ipairs(character:GetDescendants()) do
+        if part:IsA("BasePart") then
+            flyModeOriginalCollide[part] = part.CanCollide
+            part.CanCollide = false
+        end
+    end
+
+    flyModeCharacter = character
+end
+
+local function disableFlyMode()
+    if not flyModeCharacter then return end
+
+    for part, wasCollidable in pairs(flyModeOriginalCollide) do
+        if part and part.Parent then part.CanCollide = wasCollidable end
+    end
+    flyModeOriginalCollide = {}
+
+    local hrp = flyModeCharacter:FindFirstChild("HumanoidRootPart")
+    local hum = flyModeCharacter:FindFirstChild("Humanoid")
+    if hrp then hrp.Anchored = false end
+    if hum then hum:ChangeState(Enum.HumanoidStateType.GettingUp) end
+
+    flyModeCharacter = nil
+end
 
 -- Функция остановки активных циклов
 local function stopCurrentTask()
@@ -80,6 +137,7 @@ local function stopCurrentTask()
         currentTask:Disconnect()
         currentTask = nil
     end
+    disableFlyMode()
 end
 
 -- Индекс текущего бота среди всех игроков сервера (нужен, чтобы разносить ботов в пространстве)
@@ -111,6 +169,11 @@ local function startOrbit(radius, speed)
     local owner = Players:FindFirstChild(OWNER_NAME)
     if not owner or not owner.Character then return end
 
+    local myChar = LocalPlayer.Character
+    if not myChar then return end
+
+    enableFlyMode(myChar) -- без этого персонажа в воздухе трясёт и цепляет за объекты
+
     local randomDelay = math.random(0, 150) / 100
     local randomAngleOffset = math.random() * math.pi * 2
     local angle = 0
@@ -121,10 +184,10 @@ local function startOrbit(radius, speed)
     task.wait(randomDelay)
 
     currentTask = RunService.RenderStepped:Connect(function(dt)
-        local myChar = LocalPlayer.Character
-        local ownerHRP = owner.Character:FindFirstChild("HumanoidRootPart")
+        local hrp = myChar:FindFirstChild("HumanoidRootPart")
+        local ownerHRP = owner.Character and owner.Character:FindFirstChild("HumanoidRootPart")
 
-        if myChar and myChar:FindFirstChild("HumanoidRootPart") and ownerHRP then
+        if hrp and ownerHRP then
             angle = angle + (dt * (speed or 2))
             local offsetAngle = angle + (botIndex * (math.pi * 2 / #allPlayers)) + randomAngleOffset
 
@@ -135,7 +198,7 @@ local function startOrbit(radius, speed)
             local targetCFrame = CFrame.lookAt(targetPosition, ownerHRP.Position)
 
             local tweenInfo = TweenInfo.new(0.05, Enum.EasingStyle.Linear)
-            TweenService:Create(myChar.HumanoidRootPart, tweenInfo, {CFrame = targetCFrame}):Play()
+            TweenService:Create(hrp, tweenInfo, {CFrame = targetCFrame}):Play()
         else
             stopCurrentTask()
         end
@@ -179,6 +242,55 @@ local function startFollow(radius)
                     myChar.Humanoid:MoveTo(targetPos)
                 end
             end
+        else
+            stopCurrentTask()
+        end
+    end)
+end
+
+-- !swim: включает "полёт" (Anchored + без коллизий, как в !orbit) и принудительно
+-- держит анимацию плавания через Humanoid:ChangeState(Swimming) — так персонаж
+-- плывёт прямо по воздуху, а не только в настоящей воде. Пока владелец стоит на
+-- месте, бот медленно облетает его по полноценной 3D-орбите (горизонталь + вертикаль).
+local function startSwim(radius)
+    stopCurrentTask()
+
+    local owner = Players:FindFirstChild(OWNER_NAME)
+    if not owner or not owner.Character then return end
+
+    local myChar = LocalPlayer.Character
+    if not myChar then return end
+
+    enableFlyMode(myChar)
+
+    local botIndex = getBotIndex()
+    local angle = botIndex * GOLDEN_ANGLE
+    local dist = radius or 4
+    local lastOwnerPos = nil
+
+    currentTask = RunService.RenderStepped:Connect(function(dt)
+        local hrp = myChar:FindFirstChild("HumanoidRootPart")
+        local hum = myChar:FindFirstChild("Humanoid")
+        local ownerChar = owner.Character
+        local ownerHRP = ownerChar and ownerChar:FindFirstChild("HumanoidRootPart")
+
+        if hrp and hum and ownerHRP then
+            hum:ChangeState(Enum.HumanoidStateType.Swimming)
+
+            local ownerIsMoving = lastOwnerPos and (ownerHRP.Position - lastOwnerPos).Magnitude > 0.05
+            if not ownerIsMoving then
+                angle = angle + dt * FORMATION_IDLE_SPIN_SPEED
+            end
+            lastOwnerPos = ownerHRP.Position
+
+            local x = math.cos(angle) * dist
+            local z = math.sin(angle) * dist
+            local y = math.sin(angle * SWIM_VERTICAL_RATIO) * dist * SWIM_VERTICAL_SCALE
+            local targetPosition = ownerHRP.Position + Vector3.new(x, y, z)
+            local targetCFrame = CFrame.lookAt(targetPosition, ownerHRP.Position)
+
+            local tweenInfo = TweenInfo.new(0.15, Enum.EasingStyle.Linear)
+            TweenService:Create(hrp, tweenInfo, {CFrame = targetCFrame}):Play()
         else
             stopCurrentTask()
         end
@@ -403,7 +515,7 @@ local function processCommand(msg, senderName)
         startFollow(d)
     elseif command == "!swim" then
         local d = tonumber(args[2]) or followDistance
-        startFollow(d)
+        startSwim(d)
     elseif command == "!stop" then
         stopCurrentTask()
         local char = LocalPlayer.Character
