@@ -83,8 +83,6 @@ local FORMATION_HEIGHT_LAYERS = 3       -- сколько высотных "эт
 local FORMATION_HEIGHT_STEP = 4         -- расстояние по Y между этажами (studs), всегда вверх — чтобы не уйти под пол
 local FORMATION_IDLE_SPIN_SPEED = 0.3   -- рад/сек — медленное кружение, пока владелец стоит на месте
 local GOLDEN_ANGLE = 2.399963229728653  -- ~137.5°, равномерно "рассыпает" ботов по кругу независимо от их числа
-local SWIM_VERTICAL_RATIO = 0.6         -- во сколько раз вертикальная орбита !swim медленнее горизонтальной
-local SWIM_VERTICAL_SCALE = 0.5         -- амплитуда вертикального колебания относительно радиуса
 local LINEUP_ROW_SIZE = 5               -- сколько ботов в одной шеренге по умолчанию
 local LINEUP_SPACING = 4                -- studs между соседними ботами в шеренге
 local LINEUP_ROW_GAP = 5                -- studs между шеренгами
@@ -378,10 +376,15 @@ local function startFollow(radius)
     end)
 end
 
--- !swim: включает полёт (BodyVelocity/BodyGyro, как в !orbit) и принудительно
--- держит анимацию плавания через Humanoid:ChangeState(Swimming) — так персонаж
--- плывёт прямо по воздуху, а не только в настоящей воде. Пока владелец стоит на
--- месте, бот медленно облетает его по полноценной 3D-орбите (горизонталь + вертикаль).
+-- !swim: включает полёт (BodyVelocity/BodyGyro, как в !orbit) и держит анимацию
+-- плавания через Humanoid:ChangeState(Swimming) — так персонаж плывёт прямо по
+-- воздуху, а не только в настоящей воде. ChangeState вызываем только при реальном
+-- переходе в это состояние, а не каждый кадр — иначе анимация перезапускается с
+-- начала 60 раз в секунду и выглядит как "барахтанье" вместо плавного плавания.
+-- Пока владелец стоит на месте, бот кружит вокруг него по НАКЛОННОЙ орбите — это
+-- одно круговое движение и по горизонтали, и по вертикали одновременно (а не два
+-- независимых колебания), при этом высота всегда >= 0 относительно владельца,
+-- чтобы бот не ушёл под пол.
 local function startSwim(radius)
     stopCurrentTask()
 
@@ -396,6 +399,7 @@ local function startSwim(radius)
     local botIndex = getBotIndex()
     local angle = botIndex * GOLDEN_ANGLE
     local dist = radius or 4
+    local tilt = math.pi / 6 + (botIndex % 3) * (math.pi / 12) -- 30°/45°/60° наклон орбиты — разный у разных ботов
     local lastOwnerPos = nil
 
     currentTask = RunService.RenderStepped:Connect(function(dt)
@@ -405,7 +409,9 @@ local function startSwim(radius)
         local ownerHRP = ownerChar and ownerChar:FindFirstChild("HumanoidRootPart")
 
         if hrp and hum and ownerHRP then
-            hum:ChangeState(Enum.HumanoidStateType.Swimming)
+            if hum:GetState() ~= Enum.HumanoidStateType.Swimming then
+                hum:ChangeState(Enum.HumanoidStateType.Swimming)
+            end
 
             local ownerIsMoving = lastOwnerPos and (ownerHRP.Position - lastOwnerPos).Magnitude > 0.05
             if not ownerIsMoving then
@@ -414,8 +420,9 @@ local function startSwim(radius)
             lastOwnerPos = ownerHRP.Position
 
             local x = math.cos(angle) * dist
-            local z = math.sin(angle) * dist
-            local y = math.sin(angle * SWIM_VERTICAL_RATIO) * dist * SWIM_VERTICAL_SCALE
+            local depth = math.sin(angle) * dist
+            local z = depth * math.cos(tilt)
+            local y = depth * math.sin(tilt) + dist * math.sin(tilt) -- сдвиг вверх: y всегда в [0, 2*dist*sin(tilt)]
             local targetPosition = ownerHRP.Position + Vector3.new(x, y, z)
             flyTo(hrp, targetPosition, ownerHRP.Position)
         else
