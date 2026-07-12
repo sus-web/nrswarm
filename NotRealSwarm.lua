@@ -35,6 +35,10 @@ local windowOk, Window = pcall(function()
         Config = {
             Keybind = Enum.KeyCode.RightShift,
             Size = UDim2.new(0, 530, 0, 400)
+        },
+        CloseUIButton = {
+            Enabled = true,
+            Text = "Открыть UI"
         }
     })
 end)
