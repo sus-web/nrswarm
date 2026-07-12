@@ -220,6 +220,27 @@ local function sendWhisper(targetName, message)
     end)
 end
 
+-- Делает ЭТОТ аккаунт мастер-нодой и представляется всем остальным игрокам по
+-- очереди через ЛС. Вызывается и с клиента владельца (после ASSIGN по сети), и
+-- напрямую с самого бота (кнопка "Сделать эту ноду мастер-нодой" в UI) — разницы
+-- нет, в обоих случаях реальная защита — это совпадение NETWORK_SECRET у нод,
+-- которые впоследствии примут наш HELLO.
+local function becomeMasterNode()
+    isMasterNode = true
+    masterNodeName = LocalPlayer.Name
+    nodeRoster = {}
+    print("[Swarm]: Эта нода теперь MASTER NODE")
+
+    task.spawn(function()
+        for _, player in ipairs(Players:GetPlayers()) do
+            if player ~= LocalPlayer then
+                sendWhisper(player.Name, table.concat({"##SWARM##", "HELLO", NETWORK_SECRET, OWNER_NAME, LocalPlayer.Name}, " "))
+                task.wait(0.5) -- представляемся по очереди, не спамим всех разом
+            end
+        end
+    end)
+end
+
 -- Все RBXScriptConnection, созданные этим скриптом — нужно для !panic, чтобы
 -- полностью "отгрузить" старый экземпляр перед перезагрузкой (иначе старые
 -- подключения продолжат висеть в памяти и дублировать обработку команд).
@@ -681,6 +702,26 @@ SettingsPage:Button({
     end
 })
 
+-- Для случая, когда вы сидите за самим аккаунтом-ботом: не нужно слать себе ЛС
+-- через владельца, просто нажмите эту кнопку прямо здесь.
+SettingsPage:Button({
+    Title = "Сделать эту ноду мастер-нодой",
+    Desc = "Назначает МАСТЕРОМ прямо этот аккаунт, без ЛС от владельца",
+    Callback = function()
+        pcall(function()
+            if OWNER_NAME == "" then
+                warn("[Swarm]: Сначала укажите 'Ник владельца' — он передаётся в HELLO, по нему остальные ноды проверяют, что мастер настоящий")
+                return
+            end
+            if NETWORK_SECRET == "" then
+                warn("[Swarm]: Сначала задайте секретный код (должен совпадать на всех ботах)")
+                return
+            end
+            becomeMasterNode()
+        end)
+    end
+})
+
 SettingsPage:Button({
     Title = "Показать статус мастер-ноды",
     Desc = "Печатает в консоль текущее состояние master/node на этом боте",
@@ -760,22 +801,10 @@ local function processProtocolMessage(msg, senderName)
     local msgType = parts[2]
 
     if msgType == "ASSIGN" then
-        -- Только сам владелец (проверка по имени отправителя) может назначить мастер-ноду
+        -- Только сам владелец (проверка по имени отправителя) может назначить мастер-ноду по сети
         local secret, owner = parts[3], parts[4]
         if senderName == OWNER_NAME and isSecretValid(secret) and owner == OWNER_NAME then
-            isMasterNode = true
-            masterNodeName = LocalPlayer.Name
-            nodeRoster = {}
-            print("[Swarm]: Эта нода назначена MASTER NODE владельцем " .. OWNER_NAME)
-
-            task.spawn(function()
-                for _, player in ipairs(Players:GetPlayers()) do
-                    if player ~= LocalPlayer then
-                        sendWhisper(player.Name, table.concat({"##SWARM##", "HELLO", NETWORK_SECRET, OWNER_NAME, LocalPlayer.Name}, " "))
-                        task.wait(0.5) -- представляемся по очереди, не спамим всех разом
-                    end
-                end
-            end)
+            becomeMasterNode()
         end
         return true
     end
