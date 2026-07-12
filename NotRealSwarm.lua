@@ -1,6 +1,17 @@
 -- ==========================================
 -- 1. ИМПОРТ БИБЛИОТЕКИ И ИНИЦИАЛИЗАЦИЯ
 -- ==========================================
+
+-- DummyUI полагается на устаревшую глобальную функцию delay() (для авто-выбора
+-- вкладки при загрузке, анимаций тогглов/слайдеров и т.д.). В части исполнителей
+-- её больше нет, из-за чего UI открывается пустым — контент вкладки просто
+-- никогда не становится видимым. Подставляем свою реализацию поверх task.delay.
+if not delay then
+    function delay(t, f)
+        task.delay(t, f)
+    end
+end
+
 local Library = loadstring(game:HttpGet("https://raw.githubusercontent.com/hm5650/DummyUi/refs/heads/main/DummyUI.lua"))()
 
 -- Установка темы (по умолчанию Amethyst, можно менять на Dark)
@@ -26,7 +37,7 @@ local RunService = game:GetService("RunService")
 local TextChatService = game:GetService("TextChatService")
 
 local LocalPlayer = Players.LocalPlayer
-local OWNER_NAME = "OwnerName" -- Ник по умолчанию
+local OWNER_NAME = "" -- Ник владельца задаётся через поле в UI
 
 local currentTask = nil
 local orbitRadius = 10
@@ -128,7 +139,7 @@ local SettingsPage = Window:Tab({Title = "Настройки UI", Icon = ""})
 MainPage:Textbox({
     Title = "Ник владельца",
     Desc = "Ник игрока, за которым будут следовать боты",
-    Placeholder = "OwnerName",
+    Placeholder = "Введите ник владельца",
     ClearText = false,
     Callback = function(text)
         pcall(function()
