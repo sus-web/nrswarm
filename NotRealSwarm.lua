@@ -12,21 +12,39 @@ if not delay then
     end
 end
 
-local Library = loadstring(game:HttpGet("https://raw.githubusercontent.com/hm5650/DummyUi/refs/heads/main/DummyUI.lua"))()
+local libraryOk, Library = pcall(function()
+    return loadstring(game:HttpGet("https://raw.githubusercontent.com/hm5650/DummyUi/refs/heads/main/DummyUI.lua"))()
+end)
+
+if not libraryOk or not Library then
+    warn("[Swarm]: Не удалось загрузить/выполнить DummyUI.lua: " .. tostring(Library))
+    return
+end
+
+print("[Swarm]: Библиотека DummyUI загружена")
 
 -- Установка темы (по умолчанию Amethyst, можно менять на Dark)
-Library:setTheme("Amethyst")
+pcall(function() Library:setTheme("Amethyst") end)
 
-local Window = Library:Window({
-    Title = "Bot Controller UI",
-    Desc = "Управление ботами",
-    Icon = "", -- Пустая строка для иконки согласно ТЗ
-    Theme = "Amethyst",
-    Config = {
-        Keybind = Enum.KeyCode.RightShift,
-        Size = UDim2.new(0, 530, 0, 400)
-    }
-})
+local windowOk, Window = pcall(function()
+    return Library:Window({
+        Title = "Bot Controller UI",
+        Desc = "Управление ботами",
+        Icon = "", -- Пустая строка для иконки согласно ТЗ
+        Theme = "Amethyst",
+        Config = {
+            Keybind = Enum.KeyCode.RightShift,
+            Size = UDim2.new(0, 530, 0, 400)
+        }
+    })
+end)
+
+if not windowOk or not Window then
+    warn("[Swarm]: Не удалось создать окно (Library:Window): " .. tostring(Window))
+    return
+end
+
+print("[Swarm]: Окно UI создано")
 
 -- ==========================================
 -- 2. ПЕРЕМЕННЫЕ И СЛУЖЕБНЫЕ СЕРВИСЫ
@@ -130,8 +148,19 @@ end
 -- 4. СОЗДАНИЕ СТРАНИЦ И НАПОЛНЕНИЕ ЭЛЕМЕНТАМИ UI
 -- ==========================================
 
-local MainPage = Window:Tab({Title = "Главная", Icon = ""})
-local SettingsPage = Window:Tab({Title = "Настройки UI", Icon = ""})
+local mainTabOk, MainPage = pcall(function() return Window:Tab({Title = "Главная", Icon = ""}) end)
+local settingsTabOk, SettingsPage = pcall(function() return Window:Tab({Title = "Настройки UI", Icon = ""}) end)
+
+if not mainTabOk or not MainPage then
+    warn("[Swarm]: Не удалось создать вкладку 'Главная' (Window:Tab): " .. tostring(MainPage))
+    return
+end
+if not settingsTabOk or not SettingsPage then
+    warn("[Swarm]: Не удалось создать вкладку 'Настройки UI' (Window:Tab): " .. tostring(SettingsPage))
+    return
+end
+
+print("[Swarm]: Вкладки созданы, наполняю элементами UI")
 
 --- === ВКЛАДКА "ГЛАВНАЯ" === ---
 
