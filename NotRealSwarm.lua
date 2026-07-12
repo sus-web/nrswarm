@@ -6,10 +6,15 @@ local Library = loadstring(game:HttpGet("https://raw.githubusercontent.com/hm565
 -- Установка темы (по умолчанию Amethyst, можно менять на Dark)
 Library:setTheme("Amethyst")
 
-local Window = Library:CreateWindow({
+local Window = Library:Window({
     Title = "Bot Controller UI",
-    SubTitle = "Управление ботами",
-    Icon = "" -- Пустая строка для иконки согласно ТЗ
+    Desc = "Управление ботами",
+    Icon = "", -- Пустая строка для иконки согласно ТЗ
+    Theme = "Amethyst",
+    Config = {
+        Keybind = Enum.KeyCode.RightShift,
+        Size = UDim2.new(0, 530, 0, 400)
+    }
 })
 
 -- ==========================================
@@ -114,8 +119,8 @@ end
 -- 4. СОЗДАНИЕ СТРАНИЦ И НАПОЛНЕНИЕ ЭЛЕМЕНТАМИ UI
 -- ==========================================
 
-local MainPage = Window:CreatePage({Title = "Главная", Icon = ""})
-local SettingsPage = Window:CreatePage({Title = "Настройки UI", Icon = ""})
+local MainPage = Window:Tab({Title = "Главная", Icon = ""})
+local SettingsPage = Window:Tab({Title = "Настройки UI", Icon = ""})
 
 --- === ВКЛАДКА "ГЛАВНАЯ" === ---
 
@@ -281,17 +286,17 @@ local function processCommand(msg)
 end
 
 local function listenPlayer(player)
-    if player.Name == OWNER_NAME then
-        player.Chatted:Connect(function(msg)
+    player.Chatted:Connect(function(msg)
+        if player.Name == OWNER_NAME then
             processCommand(msg)
-        end)
-    end
+        end
+    end)
 end
 
 Players.PlayerAdded:Connect(listenPlayer)
 for _, p in ipairs(Players:GetPlayers()) do listenPlayer(p) end
 
-pcall(function()
+local ok, err = pcall(function()
     TextChatService.MessageReceived:Connect(function(textChatMessage)
         if textChatMessage.TextSource then
             local sender = Players:GetPlayerByUserId(textChatMessage.TextSource.UserId)
@@ -301,5 +306,8 @@ pcall(function()
         end
     end)
 end)
+if not ok then
+    warn("[Swarm]: Не удалось подписаться на TextChatService.MessageReceived: " .. tostring(err))
+end
 
 print(">>> UI и скрипт управления ботами успешно запущены! <<<")
